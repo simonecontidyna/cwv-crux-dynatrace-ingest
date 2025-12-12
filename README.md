@@ -89,9 +89,10 @@ Configure the workflow schedule in Dynatrace Workflows settings. Recommended: da
 ## Troubleshooting
 
 Check workflow logs in Dynatrace for detailed execution information. All operations are logged with structured data.
-Logs are also sent to grail, use this query to filter wokflow logs with a subset of meaningful fields:
 
-```
+Logs are also sent to Grail, use this query to filter wokflow logs with a subset of meaningful fields:
+
+```sql
 fetch logs
 | filter log.source == "ChromeUX Ingestor"
 | fields timestamp, status, content, details.actualpayloadline, details.metrics, details.errorbody.linesok, details.errorbody.error.invalidlines, details.errorbody.error.code
