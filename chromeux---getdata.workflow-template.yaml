@@ -6,7 +6,7 @@ metadata:
         version: ^1.2450.0
   inputs: []
 workflow:
-  title: ChromeUX - GetData
+  title: ChromeUX - GetData - v1.01
   tasks:
     chromeux_api_getdata:
       name: chromeux_api_getdata
@@ -15,6 +15,8 @@ workflow:
       input:
         script: >-
           /*
+        /*
+          Version v1.01 - 20251212
 
           Configuration instructions
 
