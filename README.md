@@ -7,7 +7,7 @@ Monitor real user experience metrics from Google's Chrome UX Report directly in 
 This Dynatrace workflow queries the [Chrome UX Report API](https://developer.chrome.com/docs/crux/api) to retrieve Core Web Vitals metrics (LCP, CLS, INP) for specified URLs and ingests them into Dynatrace for monitoring and benchmarking.
 
 ![Dashboard Screenshot](CVW-Dashboard-sample.png)
-example of visualization [](Core Web Vitals Benchmark.json)
+example of visualization [Core Web Vitals Benchmark.json](Core Web Vitals Benchmark.json)
 
 ## Prerequisites
 
@@ -37,7 +37,7 @@ example of visualization [](Core Web Vitals Benchmark.json)
 
 ### 3. Import Workflow
 
-1. Download the workflow files from this repository: chromeux---getdata.workflow-template.yaml
+1. Download the workflow files from this repository: [chromeux---getdata.workflow-template.yaml](chromeux---getdata.workflow-template.yaml)
 2. In Dynatrace, go to **Workflows**
 3. Import the workflow
 4. Update `Settings.ts` section:
