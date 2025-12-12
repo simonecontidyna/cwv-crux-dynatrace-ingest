@@ -1,0 +1,481 @@
+metadata:
+  version: "1"
+  dependencies:
+    apps:
+      - id: dynatrace.automations
+        version: ^1.2450.0
+  inputs: []
+workflow:
+  title: ChromeUX - GetData
+  tasks:
+    chromeux_api_getdata:
+      name: chromeux_api_getdata
+      description: Run custom JavaScript code.
+      action: dynatrace.automations:run-javascript
+      input:
+        script: >-
+          /*
+
+          Configuration instructions
+
+          Esempi di query CrUX:
+
+          https://developer.chrome.com/docs/crux/api?hl=it#example_queries
+
+          Google API KEY is required
+
+          */
+
+
+          export class Settings {
+            // Create a token credential in vault, insert Google Api Key there and copy credential ID here
+            //----------------------------------------------------------------------
+            public static CRUX_TOKEN_CRED_ID = "CREDENTIALS_VAULT-YOUR_ID_HERE";
+            //----------------------------------------------------------------------
+
+
+            
+          public static MONITORED_URLS = [
+            { url: "https://www.google.com", friendlyName: "Google_Home" },
+            { url: "https://www.wikipedia.org", friendlyName: "Wikipedia_Home" },
+            { url: "https://www.amazon.com", friendlyName: "Amazon_Home" },
+            { url: "https://www.youtube.com", friendlyName: "YouTube_Home" }
+          ];
+            
+            // Form factors
+            public static FORM_FACTORS = ["PHONE", "DESKTOP"];
+            
+            // CrUX metrics metadata config
+            public static CRUX_METRICS = [
+              { 
+                key: 'cumulative_layout_shift', 
+                name: 'cls',
+                unit: 'Ratio',
+                displayName: 'CrUX Cumulative Layout Shift P75',
+                description: 'Chrome UX Report - Cumulative Layout Shift 75th percentile',
+                parser: parseFloat 
+              },
+              { 
+                key: 'largest_contentful_paint', 
+                name: 'lcp',
+                unit: 'MilliSecond',
+                displayName: 'CrUX Largest Contentful Paint P75',
+                description: 'Chrome UX Report - Largest Contentful Paint 75th percentile in milliseconds',
+                parser: Number 
+              },
+              { 
+                key: 'interaction_to_next_paint', 
+                name: 'inp',
+                unit: 'MilliSecond',
+                displayName: 'CrUX Interaction to Next Paint P75',
+                description: 'Chrome UX Report - Interaction to Next Paint 75th percentile in milliseconds',
+                parser: Number 
+              }
+            ];
+
+            // CrUX metrics endpoint
+            public static CRUX_API_ENDPOINT = "https://chromeuxreport.googleapis.com/v1/records:queryRecord";
+            
+            // Extract metric names from config for API requests
+            public static get METRICS() {
+              return this.CRUX_METRICS.map(m => m.key);
+            }
+          }
+
+
+
+          import { Settings } from '../Settings';
+
+          import { execution } from '@dynatrace-sdk/automation-utils';
+
+          import { logsClient } from
+          '@dynatrace-sdk/client-classic-environment-v2';
+
+          import { metricsClient } from
+          '@dynatrace-sdk/client-classic-environment-v2';
+
+          import { credentialVaultClient } from
+          "@dynatrace-sdk/client-classic-environment-v2";
+
+
+          // ------------------------- LOGGER UTILITY -------------------------
+
+          async function logToDynatrace(message: string, status: string =
+          "INFO", details: any = null) {
+            const logBody: any = {
+              content: message,
+              'log.source': 'ChromeUX Ingestor',
+              status: status,
+              timestamp: new Date().toISOString()
+            };
+            
+            if (details) {
+              logBody.details = details;
+            }
+            
+            console.log(`[${status}] ${message}`, details || '');
+            
+            try {
+              await logsClient.storeLog({
+                body: logBody,
+                type: 'application/json; charset=utf-8'
+              });
+            } catch (error) {
+              console.error('Failed to send log to Dynatrace:', error);
+            }
+          }
+
+
+          // ------------------------- GET API KEY FROM CREDENTIALS VAULT
+          --------------------------
+
+          async function getTokenFromVault() {
+            await logToDynatrace('Retrieving API token from credentials vault');
+            const data = await credentialVaultClient.getCredentialsDetails({id: Settings.CRUX_TOKEN_CRED_ID});
+            await logToDynatrace('API token retrieved successfully');
+            return data.token;
+          }
+
+
+          // ------------------------- GET CRUX
+          RESPONSE  -------------------------
+
+          async function queryCruxData(url: string, formFactor: string, token:
+          string) {
+            const endpoint = Settings.CRUX_API_ENDPOINT + "?key=" + token;
+            const requestBody = JSON.stringify({
+              url: url,
+              formFactor: formFactor,
+              metrics: Settings.METRICS
+            });
+            
+            await logToDynatrace(`Querying CrUX API`, "INFO", { url, formFactor });
+            
+            try {
+              const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                  'Accept': 'application/json',
+                  'Content-Type': 'application/json'
+                },
+                body: requestBody
+              });
+              
+              if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+              }
+              
+              const responseJson = await response.json();
+              await logToDynatrace(`CrUX API response received`, "INFO", { 
+                url, 
+                formFactor,
+                metricsCount: Object.keys(responseJson.record?.metrics || {}).length
+              });
+              return responseJson;
+            } catch (error) {
+              await logToDynatrace(`Error querying CrUX API`, "ERROR", { 
+                url, 
+                formFactor, 
+                error: error.message 
+                
+              });
+              throw error;
+            }
+          }
+
+
+          // ------------------------- INGEST METRICS TO DYNATRACE
+          -------------------------
+
+          async function ingestMetrics(url: string, friendlyName: string,
+          formFactor: string, metricsData: any) {
+            const timestamp = Date.now();
+            const metrics = metricsData.record?.metrics;
+            
+            if (!metrics) {
+              await logToDynatrace(`No metrics data available`, "WARNING", { url, friendlyName, formFactor });
+              return;
+            }
+            
+            // Estrai il dominio e prepara le dimensioni comuni (chiavi in minuscolo!)
+            const domain = new URL(url).hostname;
+            const commonDimensions = `domain=${domain},formfactor=${formFactor},site=${url.replace(/[/:]/g, '_')},friendlyname=${friendlyName}`;
+            
+            const metricLines = [];
+            const metadataLines = [];
+            const ingestedMetrics = [];
+            
+            // Generates metrics lines with metadata
+            for (const metric of Settings.CRUX_METRICS) {
+              const value = metrics[metric.key]?.percentiles?.p75;
+              if (value !== undefined && value !== null) {
+                const metricKey = `crux.${metric.name}.p75`;
+                
+                metadataLines.push(
+                  `#${metricKey} gauge dt.meta.unit=${metric.unit},dt.meta.description="${metric.description}",dt.meta.displayName="${metric.displayName}"`
+                );
+                
+                metricLines.push(
+                  `${metricKey},${commonDimensions} ${metric.parser(value)} ${timestamp}`
+                );
+                
+                ingestedMetrics.push({
+                  name: metric.name.toUpperCase(),
+                  value: metric.parser(value),
+                  unit: metric.unit
+                });
+              }
+            }
+            
+            // Ingest: metadata then data
+            if (metricLines.length > 0) {
+              const payload = [...metadataLines, ...metricLines].join('\n');
+              
+              // payload logging
+              await logToDynatrace(`Preparing metrics ingestion`, "INFO", {
+                url,
+                friendlyName,
+                formFactor,
+                domain,
+                metricsCount: metricLines.length,
+                payloadPreview: payload.substring(0, 500) + (payload.length > 500 ? '...' : '')
+              });
+              
+              try {
+                const ingestionResponse = await metricsClient.ingest({
+                  body: payload,
+                  type: 'text/plain; charset=utf-8'
+                });
+                
+                // response logging
+                await logToDynatrace(`Metrics ingestion response received`, "INFO", {
+                  url,
+                  friendlyName,
+                  formFactor,
+                  response: ingestionResponse,
+                  metrics: ingestedMetrics
+                });
+                
+                // check for ingestion errors
+                if (ingestionResponse && typeof ingestionResponse === 'object') {
+                  const responseBody = ingestionResponse as any;
+                  
+                  if (responseBody.linesInvalid && responseBody.linesInvalid > 0) {
+                    await logToDynatrace(`Metrics ingestion completed with invalid lines`, "WARNING", {
+                      url,
+                      friendlyName,
+                      formFactor,
+                      linesOk: responseBody.linesOk,
+                      linesInvalid: responseBody.linesInvalid,
+                      invalidLines: responseBody.error?.invalidLines,
+                      fullError: responseBody.error,
+                      payload: payload
+                    });
+                  } else {
+                    await logToDynatrace(`Metrics ingested successfully`, "INFO", {
+                      url,
+                      friendlyName,
+                      formFactor,
+                      domain,
+                      metricsCount: metricLines.length,
+                      metrics: ingestedMetrics,
+                      linesOk: responseBody.linesOk
+                    });
+                  }
+                } else {        await logToDynatrace(`Metrics ingested (response not structured)`, "INFO", {
+                    url,
+                    friendlyName,
+                    formFactor,
+                    domain,
+                    metricsCount: metricLines.length,
+                    metrics: ingestedMetrics
+                  });
+                }
+                
+              } catch (error) {
+                // logging error details
+                const errorDetails: any = {
+                  url,
+                  friendlyName,
+                  formFactor,
+                  errorMessage: error.message,
+                  errorName: error.name,
+                  payload: payload
+                };
+                
+                if (error.body) {
+                  errorDetails.errorBody = error.body;
+                  errorDetails.linesOk = error.body.linesOk;
+                  errorDetails.linesInvalid = error.body.linesInvalid;
+                  errorDetails.invalidLines = error.body.error?.invalidLines;
+                  errorDetails.errorCode = error.body.error?.code;
+                  errorDetails.errorMessage = error.body.error?.message;
+                }
+                
+                if (error.stack) {
+                  errorDetails.stack = error.stack;
+                }
+                
+                // logging error lines individually
+                if (error.body?.error?.invalidLines) {
+                  for (const invalidLine of error.body.error.invalidLines) {
+                    await logToDynatrace(`Invalid metric line detected`, "ERROR", {
+                      url,
+                      friendlyName,
+                      formFactor,
+                      lineNumber: invalidLine.line,
+                      lineError: invalidLine.error,
+                      identifier: invalidLine.identifier,
+                      actualPayloadLine: payload.split('\n')[invalidLine.line - 1]
+                    });
+                  }
+                }
+                
+                await logToDynatrace(`Failed to ingest metrics`, "ERROR", errorDetails);
+                throw error;
+              }
+            } else {
+              await logToDynatrace(`No valid metrics to ingest`, "WARNING", { 
+                url,
+                friendlyName,
+                formFactor,
+                availableMetrics: Object.keys(metrics)
+              });
+            }
+          }
+
+
+          // ------------------------- PROCESS ALL URLs AND FORM FACTORS
+          -------------------------
+
+          async function processAllQueries() {
+            const token = await getTokenFromVault();
+            
+            await logToDynatrace(`Starting ChromeUX data collection`, "INFO", {
+              urlsCount: Settings.MONITORED_URLS.length,
+              formFactors: Settings.FORM_FACTORS,
+              urls: Settings.MONITORED_URLS.map(u => ({ url: u.url, friendlyName: u.friendlyName }))
+            });
+            
+            let successCount = 0;
+            let errorCount = 0;
+            const errors = [];
+            const processedItems = [];
+            
+            for (const urlConfig of Settings.MONITORED_URLS) {
+              for (const formFactor of Settings.FORM_FACTORS) {
+                try {
+                  const cruxData = await queryCruxData(urlConfig.url, formFactor, token);
+                  await ingestMetrics(urlConfig.url, urlConfig.friendlyName, formFactor, cruxData);
+                  
+                  successCount++;
+                  processedItems.push({
+                    url: urlConfig.url,
+                    friendlyName: urlConfig.friendlyName,
+                    formFactor,
+                    status: 'success'
+                  });
+                  
+                  // Small pause among requests to avoid limits
+                  await new Promise(resolve => setTimeout(resolve, 500));
+                  
+                } catch (error) {
+                  errorCount++;
+                  const errorMsg = `Failed to process ${urlConfig.url} (${urlConfig.friendlyName}) [${formFactor}]: ${error.message}`;
+                  errors.push(errorMsg);
+                  processedItems.push({
+                    url: urlConfig.url,
+                    friendlyName: urlConfig.friendlyName,
+                    formFactor,
+                    status: 'error',
+                    error: error.message
+                  });
+                  
+                  await logToDynatrace(`Processing failed for URL`, "ERROR", {
+                    url: urlConfig.url,
+                    friendlyName: urlConfig.friendlyName,
+                    formFactor,
+                    error: error.message
+                  });
+                }
+              }
+            }
+            
+            // final logging
+            await logToDynatrace(
+              `ChromeUX data collection completed`, 
+              errorCount > 0 ? "WARNING" : "INFO",
+              {
+                successCount,
+                errorCount,
+                totalUrls: Settings.MONITORED_URLS.length,
+                totalFormFactors: Settings.FORM_FACTORS.length,
+                totalQueries: Settings.MONITORED_URLS.length * Settings.FORM_FACTORS.length,
+                successRate: `${((successCount / (Settings.MONITORED_URLS.length * Settings.FORM_FACTORS.length)) * 100).toFixed(1)}%`,
+                processedItems,
+                errors: errors.length > 0 ? errors : undefined
+              }
+            );
+            
+            return { successCount, errorCount, errors, processedItems };
+          }
+
+
+          // ------------------------- MAIN --------------------------
+
+          export default async function ({ execution_id }) {
+            const ex = await execution(execution_id);
+            
+            await logToDynatrace(`Workflow execution started`, "INFO", {
+              executionId: execution_id,
+              triggeredBy: ex.trigger
+            });
+            
+            try {
+              const result = await processAllQueries();
+              
+              await logToDynatrace(`Workflow execution completed successfully`, "INFO", {
+                executionId: execution_id,
+                triggeredBy: ex.trigger,
+                result
+              });
+              
+              return { 
+                triggeredBy: ex.trigger,
+                result 
+              };
+              
+            } catch (e) {
+              await logToDynatrace(`Critical workflow error`, "ERROR", {
+                executionId: execution_id,
+                error: e.message,
+                stack: e.stack
+              });
+              
+              throw e;
+            }
+          }
+      position:
+        x: 0
+        y: 1
+      predecessors: []
+  description: ""
+  trigger:
+    schedule:
+      rule: null
+      trigger:
+        type: time
+        time: 07:00
+      timezone: Europe/Rome
+      isActive: true
+      isFaulty: false
+      nextExecution: null
+      filterParameters:
+        earliestStart: 2025-12-12
+      inputs: {}
+  schemaVersion: 3
+  result: null
+  input: {}
+  hourlyExecutionLimit: 1000
+  guide: null
+  type: STANDARD
